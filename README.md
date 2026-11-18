@@ -1,5 +1,7 @@
 # Wizard of Coin
 
+**Live demo:** https://wizard-of-coin-genlayer.vercel.app
+
 A browser-playable GenLayer wizard challenge connected to the optimized contract deployed on **Stable Studionet**.
 
 ## Live contract
