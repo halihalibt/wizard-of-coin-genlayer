@@ -129,6 +129,7 @@ export async function submitWizardMessage(
   address: string,
   provider: WalletProvider,
   message: string,
+  onSubmitted?: (hash: `0x${string}`) => void,
 ): Promise<{ hash: `0x${string}`; result: WizardResult | null; winnersCount: number }> {
   const client = makeWriteClient(address, provider);
   const hash = await client.writeContract({
@@ -137,6 +138,7 @@ export async function submitWizardMessage(
     args: [message],
     value: 0n,
   }) as `0x${string}`;
+  onSubmitted?.(hash);
 
   const receipt = await client.waitForTransactionReceipt({
     hash,
