@@ -1,7 +1,7 @@
 import { createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
-type FixedFixedHash = `0x${string}` & { readonly length: 66 };
+type FixedHash = `0x${string}` & { readonly length: 66 };
 
 export const CONTRACT_ADDRESS =
   "0x09903c4f4160b7a55FaE88951a682019038B2593" as `0x${string}`;
