@@ -1,7 +1,6 @@
-import { createClient } from "genlayer-js";
+import { abi, createAccount, createClient, generatePrivateKey } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
-import { TransactionStatus } from "genlayer-js/types";
-type FixedHash = `0x${string}` & { readonly length: 66 };
+export type FixedHash = `0x${string}` & { readonly length: 66 };
 
 export const CONTRACT_ADDRESS =
   "0x09903c4f4160b7a55FaE88951a682019038B2593" as `0x${string}`;
@@ -126,33 +125,82 @@ export async function readGameSnapshot(): Promise<GameSnapshot> {
   };
 }
 
+export type GuestAccount = ReturnType<typeof createAccount>;
+export function createGuestAccount() {
+  return createAccount(generatePrivateKey());
+}
+
+export async function fundGuest(account: GuestAccount) {
+  const client = makeReadClient();
+  const balance = () => client.getBalance({ address: account.address });
+  if (await balance() === 0n) {
+    await client.request({
+      method: "sim_fundAccount",
+      params: [account.address, 1_000_000_000_000_000_000],
+    } as never);
+  }
+  if (await balance() === 0n) throw new Error("水龙头尚未到账，请稍后重试。");
+}
+
 export async function submitWizardMessage(
-  address: string,
-  provider: WalletProvider,
+  sender: GuestAccount | { address: string; provider: WalletProvider },
   message: string,
-  onSubmitted?: (hash: FixedHash) => void,
-): Promise<{ hash: FixedHash; result: WizardResult | null; winnersCount: number }> {
-  const client = makeWriteClient(address, provider);
-  const hash = await client.writeContract({
+): Promise<FixedHash> {
+  const client = "provider" in sender
+    ? makeWriteClient(sender.address, sender.provider)
+    : createClient({ chain: studionet, account: sender });
+  return await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: "test_prompt",
     args: [message],
     value: 0n,
+    leaderOnly: false,
   }) as FixedHash;
-  onSubmitted?.(hash);
+}
 
-  const receipt = await client.waitForTransactionReceipt({
-    hash,
-    status: TransactionStatus.FINALIZED,
-    interval: 3000,
-    retries: 80,
-  });
+type LeaderReceipt = {
+  mode?: string;
+  error?: unknown;
+  execution_result?: string;
+  eq_outputs?: Record<string, { status?: string; payload?: { raw?: number[] } }>;
+};
 
-  const execution = String((receipt as { txExecutionResultName?: unknown }).txExecutionResultName ?? "");
-  if (execution && !["FINISHED_WITH_RETURN", "SUCCESS"].includes(execution)) {
-    throw new Error(`交易已完成，但合约执行未成功（${execution}）。请查看交易详情。`);
+export async function readDialogue(hash: FixedHash): Promise<
+  { state: "pending" | "failed" | "unknown" } | { state: "complete"; result: WizardResult }
+> {
+  const client = makeReadClient();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const tx = await client.getTransaction({ hash }).catch(() => null) as {
+      statusName?: string;
+      txExecutionResultName?: string;
+      consensus_data?: { leader_receipt?: LeaderReceipt | LeaderReceipt[] };
+    } | null;
+    if (["CANCELED", "UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"].includes(tx?.statusName ?? "")) {
+      return { state: "failed" };
+    }
+    if (tx?.statusName === "FINALIZED") {
+      const receipts = [tx.consensus_data?.leader_receipt ?? []].flat();
+      const leader = [...receipts].reverse().find((receipt) => receipt.mode === "leader") ?? receipts[0];
+      const execution = tx.txExecutionResultName || leader?.execution_result;
+      if (leader?.error || (execution && !["SUCCESS", "FINISHED_WITH_RETURN"].includes(execution))) {
+        return { state: "failed" };
+      }
+      const output = leader?.eq_outputs?.[0];
+      if (output?.status === "return" && Array.isArray(output.payload?.raw)) {
+        try {
+          const verdict = abi.calldata.decode(Uint8Array.from(output.payload.raw));
+          const won = verdict instanceof Map ? verdict.get("give_coin") : undefined;
+          if (typeof won === "boolean") {
+            const reply = verdict instanceof Map ? verdict.get("reply") : undefined;
+            return { state: "complete", result: { give_coin: won, reply: typeof reply === "string" ? reply : "" } };
+          }
+        } catch {
+          return { state: "unknown" };
+        }
+      }
+      return { state: "unknown" };
+    }
+    if (attempt < 19) await new Promise((resolve) => setTimeout(resolve, 2500));
   }
-
-  const snapshot = await readGameSnapshot();
-  return { hash, result: snapshot.lastResult, winnersCount: snapshot.winnersCount };
+  return { state: "pending" };
 }

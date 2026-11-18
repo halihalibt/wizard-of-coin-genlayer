@@ -14,11 +14,12 @@ A browser-playable GenLayer wizard challenge connected to the optimized contract
 
 ## What the app does
 
-- Connects an injected EIP-1193 wallet (MetaMask or OKX Wallet).
+- Creates a temporary Studionet wallet with test GEN, or connects MetaMask or OKX Wallet. Temporary private keys live only in page memory.
 - Switches the wallet to Stable Studionet (61999).
 - Sends the player's 1–1,000 character message to `test_prompt(request)`.
 - Waits for the GenLayer transaction to finalize and checks the execution result.
-- Reads `get_last_result()` and `get_winners_count()` from the contract.
+- Displays the submitted message, wizard reply and win outcome from the finalized transaction. Dialogue history is stored in the browser and can be filtered for successful messages.
+- Reads `get_last_result()` and `get_winners_count()` for aggregate game statistics.
 - Links every submitted transaction to the Studionet explorer.
 
 ## Contract interface
@@ -62,3 +63,7 @@ The target network and contract address are defined in `src/lib/genlayer.ts`. No
 - The frontend uses `genlayer-js@1.1.8` and the stable `studionet` network preset.
 - A consensus write may take time. The transaction hash remains available in the UI while the app waits for finalization.
 - The app does not simulate a successful verdict or fabricate on-chain reward balances.
+
+## GitHub Pages
+
+Build with `npm run build` and publish the contents of `dist/` to the root of the `gh-pages` branch with a `.nojekyll` file. The build uses relative asset URLs for the repository site.

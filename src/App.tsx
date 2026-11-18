@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import WizardScene from "./components/WizardScene";
 import {
   CONTRACT_URL,
+  createGuestAccount,
+  fundGuest,
+  readDialogue,
+  type FixedHash,
+  type GuestAccount,
   EXPLORER_URL,
   getInjectedWallet,
   readGameSnapshot,
@@ -13,6 +18,22 @@ import {
 } from "./lib/genlayer";
 
 type Phase = "idle" | "connecting" | "submitting" | "waiting" | "success" | "pending" | "error";
+
+type Dialogue = {
+  hash: FixedHash;
+  message: string;
+  state: "pending" | "failed" | "unknown" | "complete";
+  result?: WizardResult;
+};
+const historyKey = "wizard-of-coin-dialogues";
+function readHistory(): Dialogue[] {
+  try {
+    const entries = JSON.parse(localStorage.getItem(historyKey) ?? "[]");
+    return Array.isArray(entries) ? entries : [];
+  } catch {
+    return [];
+  }
+}
 
 function shortAddress(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
@@ -44,7 +65,7 @@ function ResultCard({ result }: { result: WizardResult }) {
       <div className="result-icon">{given ? "✦" : "◈"}</div>
       <div className="result-copy">
         <div className="result-eyebrow">{given ? "THE COIN HAS MOVED" : "THE WIZARD'S DECISION"}</div>
-        <strong>{given ? "女巫松口了！" : "金币还在女巫手里"}</strong>
+        <strong>{given ? "成功拿到金币" : "金币还在女巫手里"}</strong>
         <p>{result.reply || (given ? "女巫似乎改变了主意。" : "女巫守住了自己的金币。")}</p>
         {result.attempt ? <span className="result-attempt">第 {result.attempt} 次挑战</span> : null}
       </div>
@@ -58,21 +79,25 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [snapshot, setSnapshot] = useState<GameSnapshot>({ lastResult: null, winnersCount: 0 });
-  const [currentResult, setCurrentResult] = useState<WizardResult | null>(null);
-  const [txHash, setTxHash] = useState("");
+  const [guest, setGuest] = useState<GuestAccount | null>(null);
+  const [useGuest, setUseGuest] = useState(false);
+  const [history, setHistory] = useState(readHistory);
+  const [winsOnly, setWinsOnly] = useState(false);
+  const pending = history.find((entry) => entry.state === "pending");
+  const shownHistory = history.filter((entry) => !winsOnly || entry.result?.give_coin === true);
+  const signer = useGuest ? guest?.address : account;
   const [notice, setNotice] = useState("");
   const [statsLoading, setStatsLoading] = useState(true);
 
   const busy = phase === "connecting" || phase === "submitting" || phase === "waiting";
-  const canSubmit = Boolean(account && walletProvider && message.trim().length > 0 && message.length <= 1000 && !busy);
+  const canSubmit = Boolean(signer && (useGuest || walletProvider) && message.trim().length > 0 && message.length <= 1000 && !busy && !pending);
 
   const refresh = useCallback(async () => {
     setStatsLoading(true);
     try {
       const next = await readGameSnapshot();
       setSnapshot(next);
-      setCurrentResult(next.lastResult);
-      setNotice("");
+
     } catch (error) {
       setNotice(`暂时无法读取合约状态：${parseError(error)}`);
     } finally {
@@ -113,6 +138,7 @@ export default function App() {
       const accounts = await provider.request({ method: "eth_requestAccounts" }) as string[];
       if (!accounts?.[0]) throw new Error("钱包没有返回账户地址。");
       await ensureStudionet(provider);
+      setUseGuest(false);
       setWalletProvider(provider);
       setAccount(accounts[0]);
       setPhase("idle");
@@ -123,45 +149,82 @@ export default function App() {
     }
   }, []);
 
-  const submit = useCallback(async () => {
-    if (!walletProvider || !account) {
-      setNotice("请先连接钱包。");
-      return;
-    }
-    const cleanMessage = message.trim();
-    if (!cleanMessage || cleanMessage.length > 1000) return;
-    setPhase("submitting");
-    setNotice("正在请求钱包签名，请在钱包弹窗中确认。");
-    setCurrentResult(null);
-    setTxHash("");
-    try {
-      await ensureStudionet(walletProvider);
-      const clientResult = await submitWizardMessage(account, walletProvider, cleanMessage, (hash) => {
-        setTxHash(hash);
-        setPhase("waiting");
-        setNotice("交易已提交到 GenLayer，正在等待共识与最终执行结果。");
-      });
-      setTxHash(clientResult.hash);
-      setCurrentResult(clientResult.result);
-      setSnapshot((old) => ({ ...old, lastResult: clientResult.result, winnersCount: clientResult.winnersCount }));
-      setMessage("");
-      setPhase("success");
-      setNotice("挑战已完成，结果已从合约读回。");
-    } catch (error) {
-      const messageText = parseError(error);
-      if (messageText.toLowerCase().includes("timeout") || messageText.toLowerCase().includes("timed out")) {
-        setPhase("pending");
-        setNotice("交易已提交，但等待共识超时。请保留交易哈希，稍后点击“刷新链上结果”。");
-      } else {
-        setPhase("error");
-        setNotice(messageText);
+  function remember(entry: Dialogue) {
+    setHistory((previous) => {
+      const next = [entry, ...previous.filter(({ hash }) => hash !== entry.hash)];
+      try {
+        localStorage.setItem(historyKey, JSON.stringify(next));
+      } catch {
+        // Keep the current page usable if browser storage is unavailable.
       }
+      return next;
+    });
+  }
+
+  async function enableGuest() {
+    setPhase("connecting");
+    setNotice("正在领取 Studionet 测试 GEN…");
+    const temporary = guest ?? createGuestAccount();
+    setGuest(temporary);
+    setUseGuest(true);
+    try {
+      await fundGuest(temporary);
+      setPhase("idle");
+      setNotice("临时钱包已就绪。");
+    } catch (error) {
+      setPhase("error");
+      setNotice(parseError(error));
     }
-  }, [account, message, walletProvider]);
+  }
+
+  async function checkDialogue(entry: Dialogue) {
+    setPhase("waiting");
+    setNotice("交易已提交，正在等待 GenLayer 最终确认。");
+    const check = await readDialogue(entry.hash);
+    if (check.state === "complete") {
+      remember({ ...entry, ...check });
+      setPhase("success");
+      setNotice("已从这笔交易读取女巫的答复和金币判定。");
+      void refresh();
+    } else if (check.state === "pending") {
+      setPhase("pending");
+      setNotice("链上结果还没就绪，可以继续查询这笔交易。");
+    } else {
+      remember({ ...entry, ...check });
+      setPhase(check.state === "failed" ? "error" : "success");
+      setNotice(check.state === "failed" ? "合约执行未成功。" : "交易已确认，但回执缺少可核对的答复。");
+    }
+  }
+
+  async function submit() {
+    if (!canSubmit) return;
+    const cleanMessage = message.trim();
+    setPhase("submitting");
+    setNotice(useGuest ? "临时钱包正在签名并提交…" : "请在钱包中确认交易。");
+    try {
+      let hash: FixedHash;
+      if (useGuest && guest) {
+        await fundGuest(guest);
+        hash = await submitWizardMessage(guest, cleanMessage);
+      } else if (walletProvider) {
+        await ensureStudionet(walletProvider);
+        hash = await submitWizardMessage({ address: account, provider: walletProvider }, cleanMessage);
+      } else {
+        return;
+      }
+      const entry = { hash, message: cleanMessage, state: "pending" } as const;
+      remember(entry);
+      setMessage("");
+      await checkDialogue(entry);
+    } catch (error) {
+      setPhase("error");
+      setNotice(parseError(error));
+    }
+  }
 
   const phaseLabel = useMemo(() => {
     if (phase === "connecting") return "连接钱包中…";
-    if (phase === "submitting") return "等待钱包确认…";
+    if (phase === "submitting") return "正在提交…";
     if (phase === "waiting") return "女巫正在思考…";
     if (phase === "pending") return "等待链上共识";
     if (phase === "success") return "挑战已完成";
@@ -189,7 +252,7 @@ export default function App() {
             GENLAYER · STUDIONET
             <span className="network-id">61999</span>
           </a>
-          {account ? (
+          {account && !useGuest ? (
             <button className="wallet-button connected" onClick={() => setNotice("当前连接：" + account)}>
               <span className="wallet-dot" />{shortAddress(account)}
             </button>
@@ -198,6 +261,9 @@ export default function App() {
               {phase === "connecting" ? "连接中…" : "连接钱包"}
             </button>
           )}
+          <button className="wallet-button" onClick={() => void enableGuest()} disabled={busy}>
+            {useGuest ? "临时钱包 · 领取测试 GEN" : "创建临时钱包"}
+          </button>
         </div>
       </header>
 
@@ -224,7 +290,7 @@ export default function App() {
             <a href={CONTRACT_URL} target="_blank" rel="noreferrer">查看合约 ↗</a>
           </div>
           <div className="how-step"><span className="step-icon">✎</span><p>说服 AI 巫师把金币交给你。</p></div>
-          <div className="how-step"><span className="step-icon">▣</span><p>连接钱包并确认挑战交易。</p></div>
+          <div className="how-step"><span className="step-icon">▣</span><p>使用临时钱包或连接浏览器钱包，提交挑战。</p></div>
           <div className="how-step"><span className="step-icon">⚖</span><p>由 GenLayer 共识验证巫师的决定。</p></div>
           <div className="how-note">每次提交最多 1,000 个字符。女巫会记住挑战结果，链上记录可公开查询。</div>
           <div className="how-footer"><span className="how-footer-dot" />真实合约交互 · 非本地模拟</div>
@@ -273,34 +339,48 @@ export default function App() {
             disabled={!canSubmit}
           >
             {busy ? <span className="button-spinner" /> : <span className="button-sparkle">✧</span>}
-            {phase === "submitting" ? "等待钱包确认…" : phase === "waiting" ? "女巫正在思考…" : "发送消息"}
+            {phase === "submitting" ? "正在提交…" : phase === "waiting" ? "女巫正在思考…" : "发送消息"}
             {!busy ? <span className="button-sparkle trailing">✧</span> : null}
           </button>
 
-          {!account ? (
+          {!signer ? (
             <div className="connect-hint">
-              <span>◈</span> 先连接 MetaMask / OKX Wallet，才能向链上合约发起挑战。
+              <span>◈</span> 创建临时钱包即可试玩，也可连接 MetaMask 或 OKX Wallet。
             </div>
           ) : (
             <div className="wallet-line">
-              <span className="wallet-dot" />{shortAddress(account)} 已连接
+              <span className="wallet-dot" />{shortAddress(signer)} {useGuest ? "临时钱包" : "已连接"}
               <button onClick={() => void refresh()} disabled={statsLoading}>刷新链上结果</button>
             </div>
           )}
 
+          {useGuest ? <p className="guest-note">临时钱包私钥只在当前页面内存中，刷新或关闭后失效。仅用于测试 GEN。</p> : null}
+
           {notice ? <div className={`notice notice-${phase === "error" ? "error" : "info"}`}>{notice}</div> : null}
 
-          {txHash ? (
-            <a className="tx-link" href={`${EXPLORER_URL}/tx/${txHash}`} target="_blank" rel="noreferrer">
-              <span>交易记录</span><code>{shortAddress(txHash)}</code><b>↗</b>
-            </a>
-          ) : null}
-
-          {currentResult ? <ResultCard result={currentResult} /> : null}
-          {phase === "pending" ? (
-            <button className="refresh-link" onClick={() => void refresh()}>刷新链上结果</button>
+          {pending ? (
+            <button className="refresh-link" onClick={() => void checkDialogue(pending)} disabled={busy}>查询待确认交易</button>
           ) : null}
         </div>
+      </section>
+
+      <section className="dialogue-history" aria-labelledby="history-title">
+        <div className="history-heading">
+          <h3 id="history-title">对话记录</h3>
+          <label><input type="checkbox" checked={winsOnly} onChange={(event) => setWinsOnly(event.target.checked)} /> 只看成功话术</label>
+        </div>
+        {shownHistory.length === 0 ? <p>{winsOnly ? "还没有已确认的成功话术。" : "暂无对话。记录保存在当前浏览器。"}</p> : null}
+        {shownHistory.map((entry) => (
+          <article className="history-entry" key={entry.hash}>
+            <p><strong>{entry.result?.give_coin ? "成功话术" : "你的话术"}</strong> · {entry.message}</p>
+            {entry.result ? <ResultCard result={entry.result} /> : (
+              <p>{entry.state === "pending" ? "等待最终确认" : entry.state === "failed" ? "交易未成功执行" : "回执缺少可核对的答复"}</p>
+            )}
+            <a className="tx-link" href={`${EXPLORER_URL}/tx/${entry.hash}`} target="_blank" rel="noreferrer">
+              <span>查看链上交易</span><code>{shortAddress(entry.hash)}</code><b>↗</b>
+            </a>
+          </article>
+        ))}
       </section>
 
       <footer className="site-footer">
