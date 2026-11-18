@@ -136,7 +136,11 @@ export default function App() {
     setTxHash("");
     try {
       await ensureStudionet(walletProvider);
-      const clientResult = await submitWizardMessage(account, walletProvider, cleanMessage);
+      const clientResult = await submitWizardMessage(account, walletProvider, cleanMessage, (hash) => {
+        setTxHash(hash);
+        setPhase("waiting");
+        setNotice("交易已提交到 GenLayer，正在等待共识与最终执行结果。");
+      });
       setTxHash(clientResult.hash);
       setCurrentResult(clientResult.result);
       setSnapshot((old) => ({ ...old, lastResult: clientResult.result, winnersCount: clientResult.winnersCount }));
