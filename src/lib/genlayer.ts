@@ -169,38 +169,35 @@ export async function readDialogue(hash: FixedHash): Promise<
   { state: "pending" | "failed" | "unknown" } | { state: "complete"; result: WizardResult }
 > {
   const client = makeReadClient();
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const tx = await client.getTransaction({ hash }).catch(() => null) as {
-      statusName?: string;
-      txExecutionResultName?: string;
-      consensus_data?: { leader_receipt?: LeaderReceipt | LeaderReceipt[] };
-    } | null;
-    if (["CANCELED", "UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"].includes(tx?.statusName ?? "")) {
+  const tx = await client.getTransaction({ hash }).catch(() => null) as {
+    statusName?: string;
+    txExecutionResultName?: string;
+    consensus_data?: { leader_receipt?: LeaderReceipt | LeaderReceipt[] };
+  } | null;
+  if (tx?.statusName === "CANCELED") {
+    return { state: "failed" };
+  }
+  if (tx?.statusName === "FINALIZED") {
+    const receipts = [tx.consensus_data?.leader_receipt ?? []].flat();
+    const leader = [...receipts].reverse().find((receipt) => receipt.mode === "leader") ?? receipts[0];
+    const execution = tx.txExecutionResultName || leader?.execution_result;
+    if (leader?.error || (execution && !["SUCCESS", "FINISHED_WITH_RETURN"].includes(execution))) {
       return { state: "failed" };
     }
-    if (tx?.statusName === "FINALIZED") {
-      const receipts = [tx.consensus_data?.leader_receipt ?? []].flat();
-      const leader = [...receipts].reverse().find((receipt) => receipt.mode === "leader") ?? receipts[0];
-      const execution = tx.txExecutionResultName || leader?.execution_result;
-      if (leader?.error || (execution && !["SUCCESS", "FINISHED_WITH_RETURN"].includes(execution))) {
-        return { state: "failed" };
-      }
-      const output = leader?.eq_outputs?.[0];
-      if (output?.status === "return" && Array.isArray(output.payload?.raw)) {
-        try {
-          const verdict = abi.calldata.decode(Uint8Array.from(output.payload.raw));
-          const won = verdict instanceof Map ? verdict.get("give_coin") : undefined;
-          if (typeof won === "boolean") {
-            const reply = verdict instanceof Map ? verdict.get("reply") : undefined;
-            return { state: "complete", result: { give_coin: won, reply: typeof reply === "string" ? reply : "" } };
-          }
-        } catch {
-          return { state: "unknown" };
+    const output = leader?.eq_outputs?.[0];
+    if (output?.status === "return" && Array.isArray(output.payload?.raw)) {
+      try {
+        const verdict = abi.calldata.decode(Uint8Array.from(output.payload.raw));
+        const won = verdict instanceof Map ? verdict.get("give_coin") : undefined;
+        if (typeof won === "boolean") {
+          const reply = verdict instanceof Map ? verdict.get("reply") : undefined;
+          return { state: "complete", result: { give_coin: won, reply: typeof reply === "string" ? reply : "" } };
         }
+      } catch {
+        return { state: "unknown" };
       }
-      return { state: "unknown" };
     }
-    if (attempt < 19) await new Promise((resolve) => setTimeout(resolve, 2500));
+    return { state: "unknown" };
   }
   return { state: "pending" };
 }

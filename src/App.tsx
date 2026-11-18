@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WizardScene from "./components/WizardScene";
 import {
   CONTRACT_URL,
@@ -17,7 +17,7 @@ import {
   ensureStudionet,
 } from "./lib/genlayer";
 
-type Phase = "idle" | "connecting" | "submitting" | "waiting" | "success" | "pending" | "error";
+type Phase = "idle" | "connecting" | "submitting" | "error";
 
 type Dialogue = {
   hash: FixedHash;
@@ -83,21 +83,22 @@ export default function App() {
   const [useGuest, setUseGuest] = useState(false);
   const [history, setHistory] = useState(readHistory);
   const [winsOnly, setWinsOnly] = useState(false);
-  const pending = history.find((entry) => entry.state === "pending");
+  const pendingCount = history.filter((entry) => entry.state === "pending").length;
+  const hasPending = pendingCount > 0;
+  const historyRef = useRef(history);
   const shownHistory = history.filter((entry) => !winsOnly || entry.result?.give_coin === true);
   const signer = useGuest ? guest?.address : account;
   const [notice, setNotice] = useState("");
   const [statsLoading, setStatsLoading] = useState(true);
 
-  const busy = phase === "connecting" || phase === "submitting" || phase === "waiting";
-  const canSubmit = Boolean(signer && (useGuest || walletProvider) && message.trim().length > 0 && message.length <= 1000 && !busy && !pending);
+  const busy = phase === "connecting" || phase === "submitting";
+  const canSubmit = Boolean(signer && (useGuest || walletProvider) && message.trim().length > 0 && message.length <= 1000 && !busy);
 
   const refresh = useCallback(async () => {
     setStatsLoading(true);
     try {
       const next = await readGameSnapshot();
       setSnapshot(next);
-
     } catch (error) {
       setNotice(`暂时无法读取合约状态：${parseError(error)}`);
     } finally {
@@ -149,17 +150,47 @@ export default function App() {
     }
   }, []);
 
-  function remember(entry: Dialogue) {
-    setHistory((previous) => {
-      const next = [entry, ...previous.filter(({ hash }) => hash !== entry.hash)];
-      try {
-        localStorage.setItem(historyKey, JSON.stringify(next));
-      } catch {
-        // Keep the current page usable if browser storage is unavailable.
+  useEffect(() => {
+    historyRef.current = history;
+    try {
+      localStorage.setItem(historyKey, JSON.stringify(history));
+    } catch {
+      // Keep the current page usable if browser storage is unavailable.
+    }
+  }, [history]);
+
+  useEffect(() => {
+    if (!hasPending) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const lastChecked = new Map<FixedHash, number>();
+
+    async function poll() {
+      const batch = historyRef.current
+        .filter((entry) => entry.state === "pending")
+        .sort((a, b) => (lastChecked.get(a.hash) ?? 0) - (lastChecked.get(b.hash) ?? 0))
+        .slice(0, 4);
+      const changed = new Map<FixedHash, Dialogue>();
+      await Promise.all(batch.map(async (entry) => {
+        lastChecked.set(entry.hash, Date.now());
+        const check = await readDialogue(entry.hash).catch(() => null);
+        if (!check || check.state === "pending") return;
+        lastChecked.delete(entry.hash);
+        changed.set(entry.hash, { ...entry, ...check });
+      }));
+      if (stopped) return;
+      if (changed.size) {
+        setHistory((entries) => entries.map((entry) => changed.get(entry.hash) ?? entry));
+        void refresh();
       }
-      return next;
-    });
-  }
+      timer = setTimeout(() => void poll(), 4000);
+    }
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [hasPending, refresh]);
 
   async function enableGuest() {
     setPhase("connecting");
@@ -174,25 +205,6 @@ export default function App() {
     } catch (error) {
       setPhase("error");
       setNotice(parseError(error));
-    }
-  }
-
-  async function checkDialogue(entry: Dialogue) {
-    setPhase("waiting");
-    setNotice("交易已提交，正在等待 GenLayer 最终确认。");
-    const check = await readDialogue(entry.hash);
-    if (check.state === "complete") {
-      remember({ ...entry, ...check });
-      setPhase("success");
-      setNotice("已从这笔交易读取女巫的答复和金币判定。");
-      void refresh();
-    } else if (check.state === "pending") {
-      setPhase("pending");
-      setNotice("链上结果还没就绪，可以继续查询这笔交易。");
-    } else {
-      remember({ ...entry, ...check });
-      setPhase(check.state === "failed" ? "error" : "success");
-      setNotice(check.state === "failed" ? "合约执行未成功。" : "交易已确认，但回执缺少可核对的答复。");
     }
   }
 
@@ -213,9 +225,10 @@ export default function App() {
         return;
       }
       const entry = { hash, message: cleanMessage, state: "pending" } as const;
-      remember(entry);
+      setHistory((previous) => [entry, ...previous.filter((turn) => turn.hash !== hash)]);
       setMessage("");
-      await checkDialogue(entry);
+      setPhase("idle");
+      setNotice("交易已提交。可以继续发送，链上结果确认后会自动显示。");
     } catch (error) {
       setPhase("error");
       setNotice(parseError(error));
@@ -225,9 +238,6 @@ export default function App() {
   const phaseLabel = useMemo(() => {
     if (phase === "connecting") return "连接钱包中…";
     if (phase === "submitting") return "正在提交…";
-    if (phase === "waiting") return "女巫正在思考…";
-    if (phase === "pending") return "等待链上共识";
-    if (phase === "success") return "挑战已完成";
     if (phase === "error") return "需要处理";
     return "准备就绪";
   }, [phase]);
@@ -339,7 +349,7 @@ export default function App() {
             disabled={!canSubmit}
           >
             {busy ? <span className="button-spinner" /> : <span className="button-sparkle">✧</span>}
-            {phase === "submitting" ? "正在提交…" : phase === "waiting" ? "女巫正在思考…" : "发送消息"}
+            {phase === "submitting" ? "正在提交…" : "发送消息"}
             {!busy ? <span className="button-sparkle trailing">✧</span> : null}
           </button>
 
@@ -358,9 +368,7 @@ export default function App() {
 
           {notice ? <div className={`notice notice-${phase === "error" ? "error" : "info"}`}>{notice}</div> : null}
 
-          {pending ? (
-            <button className="refresh-link" onClick={() => void checkDialogue(pending)} disabled={busy}>查询待确认交易</button>
-          ) : null}
+          {pendingCount > 0 ? <p className="guest-note" role="status">{pendingCount} 笔交易等待最终确认，可以继续发送。</p> : null}
         </div>
       </section>
 
