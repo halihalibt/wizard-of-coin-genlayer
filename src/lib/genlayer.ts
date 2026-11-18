@@ -1,7 +1,7 @@
 import { createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
-import type { Hash } from "viem";
+type FixedFixedHash = `0x${string}` & { readonly length: 66 };
 
 export const CONTRACT_ADDRESS =
   "0x09903c4f4160b7a55FaE88951a682019038B2593" as `0x${string}`;
@@ -130,15 +130,15 @@ export async function submitWizardMessage(
   address: string,
   provider: WalletProvider,
   message: string,
-  onSubmitted?: (hash: Hash) => void,
-): Promise<{ hash: Hash; result: WizardResult | null; winnersCount: number }> {
+  onSubmitted?: (hash: FixedHash) => void,
+): Promise<{ hash: FixedHash; result: WizardResult | null; winnersCount: number }> {
   const client = makeWriteClient(address, provider);
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: "test_prompt",
     args: [message],
     value: 0n,
-  }) as Hash;
+  }) as FixedHash;
   onSubmitted?.(hash);
 
   const receipt = await client.waitForTransactionReceipt({
