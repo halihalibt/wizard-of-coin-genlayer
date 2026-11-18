@@ -146,7 +146,6 @@ export async function submitWizardMessage(
     status: TransactionStatus.FINALIZED,
     interval: 3000,
     retries: 80,
-    fullTransaction: false,
   });
 
   const execution = String((receipt as { txExecutionResultName?: unknown }).txExecutionResultName ?? "");
