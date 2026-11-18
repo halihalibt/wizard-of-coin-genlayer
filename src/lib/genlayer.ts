@@ -1,6 +1,7 @@
 import { createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
+import type { Hash } from "viem";
 
 export const CONTRACT_ADDRESS =
   "0x09903c4f4160b7a55FaE88951a682019038B2593" as `0x${string}`;
@@ -129,15 +130,15 @@ export async function submitWizardMessage(
   address: string,
   provider: WalletProvider,
   message: string,
-  onSubmitted?: (hash: `0x${string}`) => void,
-): Promise<{ hash: `0x${string}`; result: WizardResult | null; winnersCount: number }> {
+  onSubmitted?: (hash: Hash) => void,
+): Promise<{ hash: Hash; result: WizardResult | null; winnersCount: number }> {
   const client = makeWriteClient(address, provider);
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
     functionName: "test_prompt",
     args: [message],
     value: 0n,
-  }) as `0x${string}`;
+  }) as Hash;
   onSubmitted?.(hash);
 
   const receipt = await client.waitForTransactionReceipt({
